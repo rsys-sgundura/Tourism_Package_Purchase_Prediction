@@ -1,4 +1,3 @@
-%%writefile tourism_project/model_building/train.py
 # ------------------------------
 # Imports
 # ------------------------------
