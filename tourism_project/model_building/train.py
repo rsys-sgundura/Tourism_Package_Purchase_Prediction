@@ -43,8 +43,8 @@ ytest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytes
 # Load datasets
 Xtrain = pd.read_csv(Xtrain_path)
 Xtest = pd.read_csv(Xtest_path)
-ytrain = pd.read_csv(ytrain_path).squeeze()  # convert DataFrame -> Series
-ytest = pd.read_csv(ytest_path).squeeze()
+ytrain = pd.read_csv(ytrain_path).squeeze().astype(int)
+ytest = pd.read_csv(ytest_path).squeeze().astype(int)
 
 print("Data loaded successfully.")
 
@@ -66,10 +66,11 @@ categorical_features = [
     'ProductPitched'
 ]
 
-# Handle class imbalance
+# Compute class weights (handle imbalance)
 class_counts = ytrain.value_counts()
-class_weight = class_counts[0] / class_counts[1]
-print(f"Class weight applied: {class_weight:.2f}")
+class_weight = class_counts.get(0, 1) / class_counts.get(1, 1)
+print("Class counts:", class_counts.to_dict())
+print("Class weight:", class_weight)
 
 # Define preprocessing steps
 preprocessor = make_column_transformer(
