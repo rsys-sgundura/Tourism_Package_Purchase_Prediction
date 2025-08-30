@@ -1,148 +1,140 @@
 # ------------------------------------------------------
-# Data Preparation Script for Tourism Dataset
-# ------------------------------------------------------
-# This script:
-#  1. Loads dataset from Hugging Face Hub
-#  2. Cleans and preprocesses the data
-#  3. Handles missing values and outliers
-#  4. Encodes categorical variables
-#  5. Normalizes numerical features
-#  6. Splits the dataset into train and test sets
-#  7. Saves the processed files locally
-#  8. Uploads processed files back to Hugging Face Hub
+# Data preparation script for the Tourism purchase model
+#
+# Why this script exists:
+# - Enforces consistent cleaning and encoding so training and serving
+#   see the same feature space.
+# - Produces train/test CSVs and uploads them to the HF dataset repo
+#   for reproducibility and downstream pipelines.
 # ------------------------------------------------------
 
-# Import required libraries
+# for data manipulation
 import pandas as pd
-import sklearn
+import sklearn  # not directly used, but keeps sklearn version pinned in envs that lint imports
+# for creating a folder / env access
 import os
+# for data preprocessing and splitting
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.impute import SimpleImputer
-from huggingface_hub import login, HfApi
+# for converting categorical text to numeric codes (model-ready)
+from sklearn.preprocessing import LabelEncoder
+# for Hugging Face Hub uploads
+from huggingface_hub import HfApi
 
-# Initialize Hugging Face API using token stored in environment variable
+# ------------------------------------------------------
+# Config: HF auth & dataset location
+# ------------------------------------------------------
+# We use a token from the environment so secrets never live in code.
 api = HfApi(token=os.getenv("HF_TOKEN"))
 
-# Load dataset from Hugging Face Hub
+# Source dataset lives in an HF dataset repo; using the hf:// protocol
+# avoids manual download and ensures we read the exact committed artifact.
 DATASET_PATH = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/tourism.csv"
+
+# ------------------------------------------------------
+# Step 1: Load dataset
+# ------------------------------------------------------
+# Keep raw load simple and explicit; any I/O failure will raise early.
 df = pd.read_csv(DATASET_PATH)
-print("Dataset loaded successfully. Shape:", df.shape)
+print("Dataset loaded successfully.")
 
 # ------------------------------------------------------
-# Step 1: Drop unique identifier columns
+# Step 2: Clean inconsistent values & set categorical dtypes
 # ------------------------------------------------------
-# Unique ID/index columns do not provide predictive value
-unique_cols = [col for col in df.columns if df[col].is_unique]
-if unique_cols:
-    df.drop(columns=unique_cols, inplace=True)
-    print(f"Dropped unique columns: {unique_cols}")
+# 2a) Fix inconsistent 'Gender' label:
+#     The dataset sometimes has "Fe Male"; we normalize it to "Female"
+#     so downstream encoders see a single, consistent category.
+if "Gender" in df.columns:
+    df["Gender"] = df["Gender"].replace({"Fe Male": "Female"})
 
-# ------------------------------------------------------
-# Step 2: Separate numeric and categorical columns
-# ------------------------------------------------------
-num_cols = df.select_dtypes(include="number").columns.tolist()
-cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+# 2b) Convert all object columns to pandas 'category' dtype:
+#     - More memory efficient than plain object strings
+#     - Makes downstream intent explicit (treated as categorical, not free text)
+obj_cols = df.select_dtypes(include=["object"]).columns.tolist()
+for col in obj_cols:
+    df[col] = df[col].astype("category")
 
-# ------------------------------------------------------
-# Step 3: Handle missing values
-# ------------------------------------------------------
-# - For numeric: replace missing with median
-# - For categorical: replace missing with most frequent value
-df[num_cols] = df[num_cols].apply(lambda x: x.fillna(x.median()).astype(x.dtype))
-df[cat_cols] = df[cat_cols].apply(lambda x: x.fillna(x.mode()[0]))
-
-print("Missing values imputed.")
-
-# ------------------------------------------------------
-# Step 4: Outlier treatment (IQR method)
-# ------------------------------------------------------
-# Any value outside 1.5 * IQR range will be capped at boundary
-# Apply only to continuous numeric columns (not discrete/categorical ints)
-continuous_cols = [
-    col for col in num_cols 
-    if df[col].nunique() > 10  # heuristic: treat only if column has >10 unique values
+# 2c) Explicitly treat selected integer-coded columns as categorical:
+#     These represent discrete options, not true continuous numeric measures.
+cat_int_cols = [
+    "NumberOfFollowups",
+    "PreferredPropertyStar",
+    "Passport",
+    "CityTier",
+    "NumberOfPersonVisiting",
+    "PitchSatisfactionScore",
+    "OwnCar",
+    "NumberOfChildrenVisiting",
 ]
+for col in cat_int_cols:
+    if col in df.columns:
+        df[col] = df[col].astype("category")
 
-for col in continuous_cols:
-    Q1 = df[col].quantile(0.25)
-    Q3 = df[col].quantile(0.75)
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
-    
-    # Preserve dtype (int stays int, float stays float)
-    dtype = df[col].dtype
-    df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
-    df[col] = df[col].astype(dtype)
-
-print("Outliers treated with IQR capping on continuous columns only.")
+print("Categorical conversion completed.")
 
 # ------------------------------------------------------
-# Step 5: Encode categorical variables
+# Step 3: Label Encode all categorical columns
 # ------------------------------------------------------
-# LabelEncoder assigns integer values to string categories
+# Why LabelEncoder here?
+# - We’re preparing plain CSVs (no sklearn pipeline persisted with OneHotEncoder),
+#   so we need numeric values in the saved files.
+# - LabelEncoder gives deterministic, compact integer codes per column.
+# Note: The actual numeric codes are arbitrary (alphabetical order); that’s fine
+# as long as the same encoders are used consistently between train and serve.
+cat_cols = df.select_dtypes(include=["category"]).columns.tolist()
 label_encoders = {}
 for col in cat_cols:
     le = LabelEncoder()
     df[col] = le.fit_transform(df[col])
     label_encoders[col] = le
-
-print("Categorical variables encoded using LabelEncoder.")
-
-# ------------------------------------------------------
-# Step 6: Normalize numerical columns
-# ------------------------------------------------------
-# StandardScaler: mean = 0, variance = 1
-#if num_cols:
-#    scaler = StandardScaler()
-#    df[num_cols] = scaler.fit_transform(df[num_cols])
-#    print("Numerical columns normalized.")
+print("Label Encoding applied to categorical columns.")
 
 # ------------------------------------------------------
-# Step 7: Separate target variable
+# Step 4: Separate features/target & drop identifiers
 # ------------------------------------------------------
-# Replace "Target" with the actual target column of tourism dataset
-target_col = 'ProdTaken'  # <-- Update this with correct target column name
-if target_col in df.columns:
-    X = df.drop(columns=[target_col])  # Features
-    y = df[target_col]                 # Target
-else:
-    raise ValueError("Target column not found. Please update 'target_col'.")
+# Target column per business problem statement.
+target_col = "ProdTaken"
+
+# Drop purely-identifying columns from features; they add leakage/noise.
+drop_cols = ["CustomerID"]
+
+# Build X and y; errors='ignore' makes code robust if a column is missing.
+X = df.drop(columns=[target_col] + drop_cols, errors="ignore")
+y = df[target_col]
 
 # ------------------------------------------------------
-# Step 8: Train-test split
+# Step 5: Train-test split with stratification
 # ------------------------------------------------------
+# Stratify preserves the target class distribution in both splits,
+# critical for imbalanced classification.
 Xtrain, Xtest, ytrain, ytest = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-print("ytrain:1 =", (ytrain == 1).sum())
-print("ytrain:0 =", (ytrain == 0).sum())
-print("ytest:1  =", (ytest == 1).sum())
-print("ytest:0  =", (ytest == 0).sum())
+# (Optional) quick sanity check prints for class balance
+print("Train target distribution:\n", ytrain.value_counts(dropna=False).to_string())
+print("Test target distribution:\n", ytest.value_counts(dropna=False).to_string())
 
 # ------------------------------------------------------
-# Step 9: Save processed data locally
+# Step 6: Persist splits as flat files
 # ------------------------------------------------------
+# CSVs are simple interop artifacts that any training/serving job can consume.
 Xtrain.to_csv("Xtrain.csv", index=False)
 Xtest.to_csv("Xtest.csv", index=False)
 ytrain.to_csv("ytrain.csv", index=False)
 ytest.to_csv("ytest.csv", index=False)
-
-print("Train-test data prepared and saved locally as CSVs.")
+print("Train/test CSVs written locally.")
 
 # ------------------------------------------------------
-# Step 10: Upload processed files to Hugging Face Hub
+# Step 7: Upload artifacts to HF dataset repo
 # ------------------------------------------------------
+# Keeping the splits in the same dataset repo ensures reproducibility and
+# easy consumption across CI, notebooks, and Spaces.
 files = ["Xtrain.csv", "Xtest.csv", "ytrain.csv", "ytest.csv"]
-
 for file_path in files:
     api.upload_file(
         path_or_fileobj=file_path,
-        path_in_repo=file_path.split("/")[-1],  # just the filename
+        path_in_repo=os.path.basename(file_path),  # just the filename
         repo_id="SudeendraMG/tourism-package-purchase-prediction",
         repo_type="dataset",
     )
-
-print("Processed data uploaded successfully to Hugging Face Hub.")
+print("Train-test CSVs uploaded to Hugging Face dataset repo.")
