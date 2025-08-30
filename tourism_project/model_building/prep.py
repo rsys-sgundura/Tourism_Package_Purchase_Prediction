@@ -49,12 +49,8 @@ cat_cols = df.select_dtypes(exclude="number").columns.tolist()
 # ------------------------------------------------------
 # - For numeric: replace missing with median
 # - For categorical: replace missing with most frequent value
-if num_cols:
-    num_imputer = SimpleImputer(strategy="median")
-    df[num_cols] = num_imputer.fit_transform(df[num_cols])
-if cat_cols:
-    cat_imputer = SimpleImputer(strategy="most_frequent")
-    df[cat_cols] = cat_imputer.fit_transform(df[cat_cols])
+df[num_cols] = df[num_cols].apply(lambda x: x.fillna(x.median()).astype(x.dtype))
+df[cat_cols] = df[cat_cols].apply(lambda x: x.fillna(x.mode()[0]))
 
 print("Missing values imputed.")
 
@@ -62,15 +58,25 @@ print("Missing values imputed.")
 # Step 4: Outlier treatment (IQR method)
 # ------------------------------------------------------
 # Any value outside 1.5 * IQR range will be capped at boundary
-for col in num_cols:
+# Apply only to continuous numeric columns (not discrete/categorical ints)
+continuous_cols = [
+    col for col in num_cols 
+    if df[col].nunique() > 10  # heuristic: treat only if column has >10 unique values
+]
+
+for col in continuous_cols:
     Q1 = df[col].quantile(0.25)
     Q3 = df[col].quantile(0.75)
     IQR = Q3 - Q1
     lower_bound = Q1 - 1.5 * IQR
     upper_bound = Q3 + 1.5 * IQR
+    
+    # Preserve dtype (int stays int, float stays float)
+    dtype = df[col].dtype
     df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
+    df[col] = df[col].astype(dtype)
 
-print("Outliers treated with IQR capping.")
+print("Outliers treated with IQR capping on continuous columns only.")
 
 # ------------------------------------------------------
 # Step 5: Encode categorical variables
@@ -88,16 +94,16 @@ print("Categorical variables encoded using LabelEncoder.")
 # Step 6: Normalize numerical columns
 # ------------------------------------------------------
 # StandardScaler: mean = 0, variance = 1
-if num_cols:
-    scaler = StandardScaler()
-    df[num_cols] = scaler.fit_transform(df[num_cols])
-    print("Numerical columns normalized.")
+#if num_cols:
+#    scaler = StandardScaler()
+#    df[num_cols] = scaler.fit_transform(df[num_cols])
+#    print("Numerical columns normalized.")
 
 # ------------------------------------------------------
 # Step 7: Separate target variable
 # ------------------------------------------------------
 # Replace "Target" with the actual target column of tourism dataset
-target_col = "ProdTaken"  # <-- Update this with correct target column name
+target_col = 'ProdTaken'  # <-- Update this with correct target column name
 if target_col in df.columns:
     X = df.drop(columns=[target_col])  # Features
     y = df[target_col]                 # Target
@@ -110,10 +116,12 @@ else:
 Xtrain, Xtest, ytrain, ytest = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
+
 print("ytrain:1 =", (ytrain == 1).sum())
 print("ytrain:0 =", (ytrain == 0).sum())
 print("ytest:1  =", (ytest == 1).sum())
 print("ytest:0  =", (ytest == 0).sum())
+
 # ------------------------------------------------------
 # Step 9: Save processed data locally
 # ------------------------------------------------------
