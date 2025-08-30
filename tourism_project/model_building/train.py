@@ -1,3 +1,7 @@
+# ------------------------------------------------------
+# Tourism Package Purchase Prediction - Model Training
+# ------------------------------------------------------
+
 # for data manipulation
 import pandas as pd
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
@@ -5,8 +9,8 @@ from sklearn.compose import make_column_transformer
 from sklearn.pipeline import make_pipeline
 # for model training, tuning, and evaluation
 import xgboost as xgb
-from sklearn.model_selection import GridSearchCV, train_test_split
-from sklearn.metrics import classification_report
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import classification_report, roc_auc_score
 # for model serialization
 import joblib
 # for hugging face space authentication to upload files
@@ -33,15 +37,14 @@ ytest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytes
 # Load datasets
 Xtrain = pd.read_csv(Xtrain_path)
 Xtest = pd.read_csv(Xtest_path)
-ytrain = pd.read_csv(ytrain_path).squeeze().astype(int)
-ytest = pd.read_csv(ytest_path).squeeze().astype(int)
 
-# Ensure stratified split in case uploaded CSVs are unbalanced
-X = pd.concat([Xtrain, Xtest], axis=0)
-y = pd.concat([ytrain, ytest], axis=0)
-Xtrain, Xtest, ytrain, ytest = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
+# Ensure targets are Series (not DataFrames) and integers
+ytrain = pd.read_csv(ytrain_path).squeeze("columns").astype(int)
+ytest = pd.read_csv(ytest_path).squeeze("columns").astype(int)
+
+print("Data loaded successfully.")
+print("Training set class distribution:\n", ytrain.value_counts())
+print("Test set class distribution:\n", ytest.value_counts())
 
 # ------------------------------------------------------
 # Identify numeric and categorical features
@@ -66,26 +69,22 @@ preprocessor = make_column_transformer(
 
 # Define base XGBoost model
 xgb_model = xgb.XGBClassifier(
-    scale_pos_weight=class_weight, random_state=42, use_label_encoder=False, eval_metric="logloss"
+    scale_pos_weight=class_weight,
+    random_state=42,
+    eval_metric="logloss"  # avoids "use_label_encoder" warning
 )
 
 # Hyperparameter grid for tuning
 param_grid = {
-    'xgbclassifier__n_estimators': [50, 100, 150],
-    'xgbclassifier__max_depth': [3, 5, 7],
-    'xgbclassifier__learning_rate': [0.01, 0.05, 0.1],
-    'xgbclassifier__colsample_bytree': [0.6, 0.8, 1.0],
-    'xgbclassifier__subsample': [0.7, 0.9, 1.0],
+    'xgbclassifier__n_estimators': [50, 100],
+    'xgbclassifier__max_depth': [3, 5],
+    'xgbclassifier__learning_rate': [0.05, 0.1],
+    'xgbclassifier__colsample_bytree': [0.8, 1.0],
+    'xgbclassifier__subsample': [0.9, 1.0],
 }
 
 # Model pipeline
 model_pipeline = make_pipeline(preprocessor, xgb_model)
-
-# ------------------------------------------------------
-# Helper: Safe access for missing class labels
-# ------------------------------------------------------
-def safe_get(report, label, metric):
-    return report[label][metric] if label in report else 0.0
 
 # ------------------------------------------------------
 # Start MLflow run
@@ -94,18 +93,6 @@ with mlflow.start_run():
     # Grid search with cross-validation
     grid_search = GridSearchCV(model_pipeline, param_grid, cv=5, n_jobs=-1, scoring='f1')
     grid_search.fit(Xtrain, ytrain)
-
-    # Log each parameter combination with mean/std F1 scores
-    results = grid_search.cv_results_
-    for i in range(len(results['params'])):
-        param_set = results['params'][i]
-        mean_score = results['mean_test_score'][i]
-        std_score = results['std_test_score'][i]
-
-        with mlflow.start_run(nested=True):
-            mlflow.log_params(param_set)
-            mlflow.log_metric("mean_test_f1", mean_score)
-            mlflow.log_metric("std_test_f1", std_score)
 
     # Log best parameters from grid search
     mlflow.log_params(grid_search.best_params_)
@@ -122,20 +109,28 @@ with mlflow.start_run():
     y_pred_test = (y_pred_test_proba >= classification_threshold).astype(int)
 
     # Reports
-    train_report = classification_report(ytrain, y_pred_train, output_dict=True)
-    test_report = classification_report(ytest, y_pred_test, output_dict=True)
+    train_report = classification_report(ytrain, y_pred_train, output_dict=True, zero_division=0)
+    test_report = classification_report(ytest, y_pred_test, output_dict=True, zero_division=0)
 
-    # Log metrics safely
+    # Log metrics
     mlflow.log_metrics({
         "train_accuracy": train_report['accuracy'],
-        "train_precision": safe_get(train_report, "1", "precision"),
-        "train_recall": safe_get(train_report, "1", "recall"),
-        "train_f1-score": safe_get(train_report, "1", "f1-score"),
+        "train_precision": train_report.get('1', {}).get('precision', 0),
+        "train_recall": train_report.get('1', {}).get('recall', 0),
+        "train_f1-score": train_report.get('1', {}).get('f1-score', 0),
         "test_accuracy": test_report['accuracy'],
-        "test_precision": safe_get(test_report, "1", "precision"),
-        "test_recall": safe_get(test_report, "1", "recall"),
-        "test_f1-score": safe_get(test_report, "1", "f1-score")
+        "test_precision": test_report.get('1', {}).get('precision', 0),
+        "test_recall": test_report.get('1', {}).get('recall', 0),
+        "test_f1-score": test_report.get('1', {}).get('f1-score', 0)
     })
+
+    # Optional: ROC AUC (only if both classes present)
+    if len(set(ytest)) > 1:
+        auc = roc_auc_score(ytest, y_pred_test_proba)
+        mlflow.log_metric("test_roc_auc", auc)
+        print("Test ROC AUC:", auc)
+    else:
+        print("Skipped ROC AUC: only one class present in ytest")
 
     # Save the model locally
     model_path = "best_tourism_model_v1.joblib"
