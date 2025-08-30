@@ -4,19 +4,18 @@
 
 # for data manipulation
 import pandas as pd
+import joblib
+import xgboost as xgb
+import mlflow
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import make_column_transformer
-from sklearn.pipeline import make_pipeline
-# for model training, tuning, and evaluation
-import xgboost as xgb
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report, roc_auc_score
-# for model serialization
-import joblib
-# for hugging face hub uploads
+
+# for hugging face space authentication to upload files
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
-import mlflow
 
 # ------------------------------------------------------
 # Setup MLflow experiment
@@ -33,6 +32,7 @@ Xtrain_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/Xtr
 Xtest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/Xtest.csv"
 ytrain_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytrain.csv"
 ytest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytest.csv"
+encoders_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/label_encoders.pkl"
 
 # Load datasets
 Xtrain = pd.read_csv(Xtrain_path)
@@ -40,35 +40,19 @@ Xtest = pd.read_csv(Xtest_path)
 ytrain = pd.read_csv(ytrain_path).squeeze("columns").astype(int)
 ytest = pd.read_csv(ytest_path).squeeze("columns").astype(int)
 
-print("Data loaded successfully.")
+# Load label encoders (created in prep.py and uploaded)
+import joblib
+encoders = joblib.load(encoders_path)
+
+print("Data + encoders loaded successfully.")
 print("Training set class distribution:\n", ytrain.value_counts())
 print("Test set class distribution:\n", ytest.value_counts())
 
 # ------------------------------------------------------
-# Identify numeric vs categorical features
+# Identify numeric and categorical features
 # ------------------------------------------------------
-# At this stage all categorical columns were label-encoded in prep.py,
-# so they are integers but semantically categorical.
-# -> We should NOT scale these categorical-int columns.
-categorical_int_cols = [
-    "Gender",
-    "NumberOfFollowups",
-    "PreferredPropertyStar",
-    "Passport",
-    "CityTier",
-    "NumberOfPersonVisiting",
-    "PitchSatisfactionScore",
-    "OwnCar",
-    "NumberOfChildrenVisiting",
-    "Designation",  # also label-encoded
-    "MaritalStatus" # also label-encoded
-]
-
-numeric_features = [col for col in Xtrain.select_dtypes(include="number").columns 
-                    if col not in categorical_int_cols]
-
-print("Numeric features:", numeric_features)
-print("Categorical (encoded int) features:", categorical_int_cols)
+numeric_features = Xtrain.select_dtypes(include="number").columns.tolist()
+categorical_features = Xtrain.select_dtypes(exclude="number").columns.tolist()
 
 # ------------------------------------------------------
 # Handle class imbalance using scale_pos_weight
@@ -80,20 +64,20 @@ print("Scale_pos_weight:", class_weight)
 # ------------------------------------------------------
 # Define preprocessing pipeline
 # ------------------------------------------------------
-# Only scale numeric continuous features
+# (Since categorical vars were already label-encoded, only scale numerics)
 preprocessor = make_column_transformer(
     (StandardScaler(), numeric_features),
-    remainder="passthrough"   # keep categorical ints as-is
+    remainder="passthrough"
 )
 
-# Define base XGBoost model
+# Base XGBoost model
 xgb_model = xgb.XGBClassifier(
     scale_pos_weight=class_weight,
     random_state=42,
-    eval_metric="logloss"  # avoids "use_label_encoder" warning
+    eval_metric="logloss"
 )
 
-# Hyperparameter grid for tuning
+# Hyperparameter grid
 param_grid = {
     'xgbclassifier__n_estimators': [50, 100],
     'xgbclassifier__max_depth': [3, 5],
@@ -102,60 +86,54 @@ param_grid = {
     'xgbclassifier__subsample': [0.9, 1.0],
 }
 
-# Model pipeline
+# Pipeline
 model_pipeline = make_pipeline(preprocessor, xgb_model)
 
 # ------------------------------------------------------
 # Start MLflow run
 # ------------------------------------------------------
 with mlflow.start_run():
-    # Grid search with cross-validation
     grid_search = GridSearchCV(model_pipeline, param_grid, cv=5, n_jobs=-1, scoring='f1')
     grid_search.fit(Xtrain, ytrain)
 
-    # Log best parameters
     mlflow.log_params(grid_search.best_params_)
-
-    # Best model
     best_model = grid_search.best_estimator_
 
-    # Apply custom classification threshold
+    # Apply custom threshold
     classification_threshold = 0.45
-    y_pred_train_proba = best_model.predict_proba(Xtrain)[:, 1]
-    y_pred_train = (y_pred_train_proba >= classification_threshold).astype(int)
-
     y_pred_test_proba = best_model.predict_proba(Xtest)[:, 1]
     y_pred_test = (y_pred_test_proba >= classification_threshold).astype(int)
 
-    # Reports
-    train_report = classification_report(ytrain, y_pred_train, output_dict=True, zero_division=0)
+    # Classification report
     test_report = classification_report(ytest, y_pred_test, output_dict=True, zero_division=0)
 
     # Log metrics
     mlflow.log_metrics({
-        "train_accuracy": train_report['accuracy'],
-        "train_precision": train_report.get('1', {}).get('precision', 0),
-        "train_recall": train_report.get('1', {}).get('recall', 0),
-        "train_f1-score": train_report.get('1', {}).get('f1-score', 0),
         "test_accuracy": test_report['accuracy'],
         "test_precision": test_report.get('1', {}).get('precision', 0),
         "test_recall": test_report.get('1', {}).get('recall', 0),
-        "test_f1-score": test_report.get('1', {}).get('f1-score', 0)
+        "test_f1-score": test_report.get('1', {}).get('f1-score', 0),
     })
 
-    # ROC AUC
+    # Optional ROC AUC
     if len(set(ytest)) > 1:
         auc = roc_auc_score(ytest, y_pred_test_proba)
         mlflow.log_metric("test_roc_auc", auc)
         print("Test ROC AUC:", auc)
 
-    # Save the model
+    # ------------------------------------------------------
+    # Save model + encoders
+    # ------------------------------------------------------
     model_path = "best_tourism_model_v1.joblib"
-    joblib.dump(best_model, model_path)
+    encoder_path = "label_encoders.pkl"
 
-    # Log model in MLflow
+    joblib.dump(best_model, model_path)
+    joblib.dump(encoders, encoder_path)
+
     mlflow.log_artifact(model_path, artifact_path="model")
-    print(f"Model saved as artifact at: {model_path}")
+    mlflow.log_artifact(encoder_path, artifact_path="encoders")
+
+    print(f"Model saved as {model_path}, encoders saved as {encoder_path}")
 
     # ------------------------------------------------------
     # Upload to Hugging Face Hub
@@ -171,9 +149,11 @@ with mlflow.start_run():
         create_repo(repo_id=repo_id, repo_type=repo_type, private=False)
         print(f"Repo '{repo_id}' created.")
 
-    api.upload_file(
-        path_or_fileobj=model_path,
-        path_in_repo=model_path,
-        repo_id=repo_id,
-        repo_type=repo_type,
-    )
+    # Upload both files
+    for file_path in [model_path, encoder_path]:
+        api.upload_file(
+            path_or_fileobj=file_path,
+            path_in_repo=file_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
