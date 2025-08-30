@@ -1,21 +1,22 @@
+%%writefile tourism_project/model_building/train.py
 # ------------------------------------------------------
 # Tourism Package Purchase Prediction - Model Training
 # ------------------------------------------------------
 
 # for data manipulation
 import pandas as pd
-import joblib
+from sklearn.preprocessing import StandardScaler
+from sklearn.compose import make_column_transformer
+from sklearn.pipeline import make_pipeline
 # for model training, tuning, and evaluation
 import xgboost as xgb
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.compose import make_column_transformer
+# for model serialization
+import joblib
 # for hugging face hub
-from huggingface_hub import HfApi, create_repo, hf_hub_download
+from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
-# for experiment tracking
 import mlflow
 
 # ------------------------------------------------------
@@ -27,35 +28,34 @@ mlflow.set_experiment("tourism-training-experiment")
 api = HfApi()
 
 # ------------------------------------------------------
-# Hugging Face dataset repo
+# Dataset paths (from Hugging Face dataset repo)
 # ------------------------------------------------------
-DATASET_REPO = "SudeendraMG/tourism-package-purchase-prediction"
-
-# Download all files
-Xtrain_path = hf_hub_download(repo_id=DATASET_REPO, filename="Xtrain.csv", repo_type="dataset")
-Xtest_path  = hf_hub_download(repo_id=DATASET_REPO, filename="Xtest.csv", repo_type="dataset")
-ytrain_path = hf_hub_download(repo_id=DATASET_REPO, filename="ytrain.csv", repo_type="dataset")
-ytest_path  = hf_hub_download(repo_id=DATASET_REPO, filename="ytest.csv", repo_type="dataset")
-encoders_path = hf_hub_download(repo_id=DATASET_REPO, filename="label_encoders.pkl", repo_type="dataset")
+Xtrain_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/Xtrain.csv"
+Xtest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/Xtest.csv"
+ytrain_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytrain.csv"
+ytest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytest.csv"
+encoders_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/label_encoders.pkl"
 
 # Load datasets
 Xtrain = pd.read_csv(Xtrain_path)
 Xtest = pd.read_csv(Xtest_path)
+
+# Ensure targets are Series (not DataFrames) and integers
 ytrain = pd.read_csv(ytrain_path).squeeze("columns").astype(int)
 ytest = pd.read_csv(ytest_path).squeeze("columns").astype(int)
 
-# Load encoders (saved in prep.py)
+# Load saved encoders (to be re-uploaded later with the model)
 encoders = joblib.load(encoders_path)
 
-print("Data and encoders loaded successfully.")
+print("Data loaded successfully.")
 print("Training set class distribution:\n", ytrain.value_counts())
 print("Test set class distribution:\n", ytest.value_counts())
 
 # ------------------------------------------------------
-# Identify numeric and categorical features
+# Identify numeric features
+# (categoricals were already LabelEncoded in prep.py)
 # ------------------------------------------------------
 numeric_features = Xtrain.select_dtypes(include="number").columns.tolist()
-categorical_features = Xtrain.select_dtypes(exclude="number").columns.tolist()
 
 # ------------------------------------------------------
 # Handle class imbalance using scale_pos_weight
@@ -67,7 +67,6 @@ print("Scale_pos_weight:", class_weight)
 # ------------------------------------------------------
 # Define preprocessing pipeline
 # ------------------------------------------------------
-# (categorical already label-encoded in prep.py → no OneHotEncoder needed)
 preprocessor = make_column_transformer(
     (StandardScaler(), numeric_features),
     remainder="passthrough"
@@ -77,7 +76,7 @@ preprocessor = make_column_transformer(
 xgb_model = xgb.XGBClassifier(
     scale_pos_weight=class_weight,
     random_state=42,
-    eval_metric="logloss"
+    eval_metric="logloss"  # avoids "use_label_encoder" warning
 )
 
 # Hyperparameter grid for tuning
@@ -130,7 +129,7 @@ with mlflow.start_run():
         "test_f1-score": test_report.get('1', {}).get('f1-score', 0)
     })
 
-    # Optional: ROC AUC
+    # Optional: ROC AUC (only if both classes present)
     if len(set(ytest)) > 1:
         auc = roc_auc_score(ytest, y_pred_test_proba)
         mlflow.log_metric("test_roc_auc", auc)
@@ -142,12 +141,17 @@ with mlflow.start_run():
     model_path = "best_tourism_model_v1.joblib"
     joblib.dump(best_model, model_path)
 
+    # Save encoders locally (re-dump for upload)
+    encoders_local_path = "label_encoders.pkl"
+    joblib.dump(encoders, encoders_local_path)
+
     # Log model as MLflow artifact
     mlflow.log_artifact(model_path, artifact_path="model")
-    print(f"Model saved as artifact at: {model_path}")
+    mlflow.log_artifact(encoders_local_path, artifact_path="encoders")
+    print(f"Artifacts saved locally: {model_path}, {encoders_local_path}")
 
     # ------------------------------------------------------
-    # Upload best model to Hugging Face Hub
+    # Upload best model + encoders to Hugging Face Hub
     # ------------------------------------------------------
     repo_id = "SudeendraMG/tourism_model"
     repo_type = "model"
@@ -160,9 +164,18 @@ with mlflow.start_run():
         create_repo(repo_id=repo_id, repo_type=repo_type, private=False)
         print(f"Repo '{repo_id}' created.")
 
+    # Upload model
     api.upload_file(
         path_or_fileobj=model_path,
         path_in_repo=model_path,
+        repo_id=repo_id,
+        repo_type=repo_type,
+    )
+
+    # Upload encoders
+    api.upload_file(
+        path_or_fileobj=encoders_local_path,
+        path_in_repo="label_encoders.pkl",
         repo_id=repo_id,
         repo_type=repo_type,
     )
