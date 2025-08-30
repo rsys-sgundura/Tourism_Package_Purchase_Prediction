@@ -2,6 +2,7 @@
 # Tourism Package Purchase Prediction - Data Preparation
 # ------------------------------------------------------
 
+
 # for data manipulation
 import pandas as pd
 # for train-test split
