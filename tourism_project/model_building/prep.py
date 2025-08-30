@@ -108,9 +108,12 @@ else:
 # Step 8: Train-test split
 # ------------------------------------------------------
 Xtrain, Xtest, ytrain, ytest = train_test_split(
-    X, y, test_size=0.2, random_state=42
+    X, y, test_size=0.2, random_state=42, stratify=y
 )
-
+print("ytrain:1 =", (ytrain == 1).sum())
+print("ytrain:0 =", (ytrain == 0).sum())
+print("ytest:1  =", (ytest == 1).sum())
+print("ytest:0  =", (ytest == 0).sum())
 # ------------------------------------------------------
 # Step 9: Save processed data locally
 # ------------------------------------------------------
