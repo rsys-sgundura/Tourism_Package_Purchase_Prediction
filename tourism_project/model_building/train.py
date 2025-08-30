@@ -1,4 +1,4 @@
-%%writefile tourism_project/model_building/train.py
+
 # ------------------------------------------------------
 # Tourism Package Purchase Prediction - Model Training
 # ------------------------------------------------------
