@@ -1,109 +1,79 @@
-# ------------------------------------------------------
-# Tourism Package Purchase Prediction - Data Preparation
-# ------------------------------------------------------
-
-
 # for data manipulation
 import pandas as pd
-# for train-test split
-from sklearn.model_selection import train_test_split
-# for encoding
-from sklearn.preprocessing import LabelEncoder
-# for saving encoders
-import joblib
-# for hugging face hub
+import sklearn
+# for creating a folder
 import os
-from huggingface_hub import HfApi
+# for data preprocessing and pipeline creation
+from sklearn.model_selection import train_test_split
+# for hugging face space authentication to upload files
+from huggingface_hub import login, HfApi
 
-# ------------------------------------------------------
-# Constants
-# ------------------------------------------------------
+# Define constants for the dataset and output paths
 api = HfApi(token=os.getenv("HF_TOKEN"))
 DATASET_PATH = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/tourism.csv"
-REPO_ID = "SudeendraMG/tourism-package-purchase-prediction"
-
-# ------------------------------------------------------
-# Load dataset
-# ------------------------------------------------------
-df = pd.read_csv(DATASET_PATH)
+tourism_dataset = pd.read_csv(DATASET_PATH)
 print("Dataset loaded successfully.")
 
-# ------------------------------------------------------
-# Basic cleaning
-# ------------------------------------------------------
-# Drop CustomerID (unique identifier not used for training)
-if "CustomerID" in df.columns:
-    df.drop(columns=["CustomerID"], inplace=True)
+# Define the target variable for the classification task
+target = 'ProdTaken'     # Target variable indicating whether the customer has purchased a package (0: No, 1: Yes).
 
-# Fix inconsistent gender values
-if "Gender" in df.columns:
-    df["Gender"] = df["Gender"].replace("Fe Male", "Female")
+# Drop the unique identifier
+tourism_dataset.drop(columns=['CustomerID'], inplace=True)
 
-# ------------------------------------------------------
-# Convert columns to category
-# ------------------------------------------------------
-# All object columns → category
-for col in df.select_dtypes(include="object").columns:
-    df[col] = df[col].astype("category")
-
-# Explicit numeric-to-category conversions
-cat_cols = [
-    "NumberOfFollowups",
-    "PreferredPropertyStar",
-    "Passport",
-    "CityTier",
-    "NumberOfPersonVisiting",
-    "PitchSatisfactionScore",
-    "OwnCar",
-    "NumberOfChildrenVisiting",
+# List of numerical features in the dataset
+numeric_features = [
+    'Age',                      # Age of the customer i.e. 41.0,29.0,47.0
+    'CityTier',                 # The city category based on development, population, and living standards (Tier 1 > Tier 2 > Tier 3). i.e. 1,2,3
+    'DurationOfPitch',          # Duration of the sales pitch delivered to the customer. i.e. 6.0,4.0,8.0,9.0
+    'NumberOfPersonVisiting',   # Total number of people accompanying the customer on the trip. i.e. 3,2,3
+    'NumberOfFollowups',        # Total number of follow-ups by the salesperson after the sales pitch. i.e. 3.0,2.0
+    'PreferredPropertyStar',    # Preferred hotel rating by the customer. i.e. 3.0,4.0,5.0
+    'NumberOfTrips',            # Average number of trips the customer takes annually. i.e. 1.0,2.0,7.0,5.0
+    'Passport',                 # Whether the customer holds a valid passport (0: No, 1: Yes).
+    'OwnCar',                   # Whether the customer owns a car (0: No, 1: Yes).
+    'PitchSatisfactionScore',   # Score indicating the customer's satisfaction with the sales pitch. i.e. 2,3
+    'NumberOfChildrenVisiting', # Number of children below age 5 accompanying the customer. i.e. 0.0,2.0,5.0
+    'MonthlyIncome',            # Gross monthly income of the customer.
 ]
-for col in cat_cols:
-    if col in df.columns:
-        df[col] = df[col].astype("category")
 
-# ------------------------------------------------------
-# Label Encoding
-# ------------------------------------------------------
-encoders = {}
-for col in df.select_dtypes(include="category").columns:
-    le = LabelEncoder()
-    df[col] = le.fit_transform(df[col])
-    encoders[col] = le
+# List of categorical features in the dataset
+categorical_features = [
+    'TypeofContact',         # The method by which the customer was contacted (Company Invited or Self Inquiry).
+    'Occupation',            # Customer's occupation (e.g., Salaried, Free lancer).
+    'Gender',                # Gender of the customer (Male, Female, Fe male ).
+    'ProductPitched',        # The type of product pitched to the customer.
+    'MaritalStatus',         # Marital status of the customer (Single, Married, Divorced).
+    'Designation',           # Customer's designation in their current organization.
+]
 
-print("Categorical columns label encoded.")
+tourism_dataset['Gender']=tourism_dataset['Gender'].replace({'Fe Male' : 'Female'})
 
-# ------------------------------------------------------
-# Split into train/test
-# ------------------------------------------------------
-target_col = "ProdTaken"  # Target variable in tourism dataset
-X = df.drop(columns=[target_col])
-y = df[target_col]
+# Define predictor matrix (X) using selected numeric and categorical features
+X = tourism_dataset[numeric_features + categorical_features]  #18 columns in total here .
 
+# Define target variable
+y = tourism_dataset[target]
+
+
+# Split the dataset into training and test sets
 Xtrain, Xtest, ytrain, ytest = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
+    X, y,              # Predictors (X) and target variable (y)
+    test_size=0.2,     # 20% of the data is reserved for testing
+    random_state=42    # Ensures reproducibility by setting a fixed random seed
 )
 
-# Save splits
-Xtrain.to_csv("Xtrain.csv", index=False)
-Xtest.to_csv("Xtest.csv", index=False)
-ytrain.to_csv("ytrain.csv", index=False)
-ytest.to_csv("ytest.csv", index=False)
+Xtrain.to_csv("Xtrain.csv",index=False)
+Xtest.to_csv("Xtest.csv",index=False)
+ytrain.to_csv("ytrain.csv",index=False)
+ytest.to_csv("ytest.csv",index=False)
 
-# Save encoders
-joblib.dump(encoders, "label_encoders.pkl")
-print("Train/test splits and label encoders saved locally.")
 
-# ------------------------------------------------------
-# Upload files to Hugging Face Hub
-# ------------------------------------------------------
-files = ["Xtrain.csv", "Xtest.csv", "ytrain.csv", "ytest.csv", "label_encoders.pkl"]
+files = ["Xtrain.csv","Xtest.csv","ytrain.csv","ytest.csv"]
 
 for file_path in files:
     api.upload_file(
         path_or_fileobj=file_path,
-        path_in_repo=file_path,
-        repo_id=REPO_ID,
+        path_in_repo=file_path.split("/")[-1],  # just the filename
+        repo_id="SudeendraMG/tourism-package-purchase-prediction",
         repo_type="dataset",
     )
-
-print("All files uploaded to Hugging Face dataset repo successfully.")
