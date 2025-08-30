@@ -4,7 +4,7 @@
 
 # for data manipulation
 import pandas as pd
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn.compose import make_column_transformer
 from sklearn.pipeline import make_pipeline
 # for model training, tuning, and evaluation
@@ -13,7 +13,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report, roc_auc_score
 # for model serialization
 import joblib
-# for hugging face space authentication to upload files
+# for hugging face hub uploads
 from huggingface_hub import HfApi, create_repo
 from huggingface_hub.utils import RepositoryNotFoundError
 import mlflow
@@ -37,8 +37,6 @@ ytest_path = "hf://datasets/SudeendraMG/tourism-package-purchase-prediction/ytes
 # Load datasets
 Xtrain = pd.read_csv(Xtrain_path)
 Xtest = pd.read_csv(Xtest_path)
-
-# Ensure targets are Series (not DataFrames) and integers
 ytrain = pd.read_csv(ytrain_path).squeeze("columns").astype(int)
 ytest = pd.read_csv(ytest_path).squeeze("columns").astype(int)
 
@@ -47,10 +45,30 @@ print("Training set class distribution:\n", ytrain.value_counts())
 print("Test set class distribution:\n", ytest.value_counts())
 
 # ------------------------------------------------------
-# Identify numeric and categorical features
+# Identify numeric vs categorical features
 # ------------------------------------------------------
-numeric_features = Xtrain.select_dtypes(include="number").columns.tolist()
-categorical_features = Xtrain.select_dtypes(exclude="number").columns.tolist()
+# At this stage all categorical columns were label-encoded in prep.py,
+# so they are integers but semantically categorical.
+# -> We should NOT scale these categorical-int columns.
+categorical_int_cols = [
+    "Gender",
+    "NumberOfFollowups",
+    "PreferredPropertyStar",
+    "Passport",
+    "CityTier",
+    "NumberOfPersonVisiting",
+    "PitchSatisfactionScore",
+    "OwnCar",
+    "NumberOfChildrenVisiting",
+    "Designation",  # also label-encoded
+    "MaritalStatus" # also label-encoded
+]
+
+numeric_features = [col for col in Xtrain.select_dtypes(include="number").columns 
+                    if col not in categorical_int_cols]
+
+print("Numeric features:", numeric_features)
+print("Categorical (encoded int) features:", categorical_int_cols)
 
 # ------------------------------------------------------
 # Handle class imbalance using scale_pos_weight
@@ -62,9 +80,10 @@ print("Scale_pos_weight:", class_weight)
 # ------------------------------------------------------
 # Define preprocessing pipeline
 # ------------------------------------------------------
+# Only scale numeric continuous features
 preprocessor = make_column_transformer(
     (StandardScaler(), numeric_features),
-    (OneHotEncoder(handle_unknown='ignore'), categorical_features)
+    remainder="passthrough"   # keep categorical ints as-is
 )
 
 # Define base XGBoost model
@@ -94,10 +113,10 @@ with mlflow.start_run():
     grid_search = GridSearchCV(model_pipeline, param_grid, cv=5, n_jobs=-1, scoring='f1')
     grid_search.fit(Xtrain, ytrain)
 
-    # Log best parameters from grid search
+    # Log best parameters
     mlflow.log_params(grid_search.best_params_)
 
-    # Retrieve best model
+    # Best model
     best_model = grid_search.best_estimator_
 
     # Apply custom classification threshold
@@ -124,24 +143,22 @@ with mlflow.start_run():
         "test_f1-score": test_report.get('1', {}).get('f1-score', 0)
     })
 
-    # Optional: ROC AUC (only if both classes present)
+    # ROC AUC
     if len(set(ytest)) > 1:
         auc = roc_auc_score(ytest, y_pred_test_proba)
         mlflow.log_metric("test_roc_auc", auc)
         print("Test ROC AUC:", auc)
-    else:
-        print("Skipped ROC AUC: only one class present in ytest")
 
-    # Save the model locally
+    # Save the model
     model_path = "best_tourism_model_v1.joblib"
     joblib.dump(best_model, model_path)
 
-    # Log model as MLflow artifact
+    # Log model in MLflow
     mlflow.log_artifact(model_path, artifact_path="model")
     print(f"Model saved as artifact at: {model_path}")
 
     # ------------------------------------------------------
-    # Upload best model to Hugging Face Hub
+    # Upload to Hugging Face Hub
     # ------------------------------------------------------
     repo_id = "SudeendraMG/tourism_model"
     repo_type = "model"
